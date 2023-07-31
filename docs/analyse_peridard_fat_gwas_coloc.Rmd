@@ -1,0 +1,578 @@
+---
+title: "Analyse colocalisation of pericardial fat GWAS"
+author: 
+- name: "Aaron Wagen"
+  affiliation: UCL
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  bookdown::html_document2:
+    figure_caption: yes
+    code_folding: hide
+    theme: paper
+    highlight: haddock
+    df_print: paged
+    toc: true
+    toc depth: 3
+    toc_float: true
+    number_sections: true
+    css: styles.css
+  md_document:
+    variant: markdown_github
+    toc: true
+    number_sections: true
+always_allow_html: true
+link-citations: true
+notes-after-punctuation: false
+---
+
+```{r setup, include = F}
+## Load libraries
+library(here) # For project-specific paths
+library(coloc)
+library(colochelpR)
+library(data.table)
+library(plyranges)
+library(tidytable) # For faster separation of columns of eqtl data
+library(GenomicRanges) 
+library(biomaRt)
+library(qdapTools)
+library(LDlinkR)
+library(pheatmap)
+library(DBI)
+library(patchwork)
+library(viridis)
+library(sciRmdTheme)
+library(paletteer)
+library(pheatmap)
+library(wesanderson)
+library(kableExtra)
+library(tidyverse) # For tidy manipulation of data
+
+
+## Set options
+options(dplyr.summarise.inform = FALSE)
+options(lifecycle_verbosity = "warning")
+knitr::opts_chunk$set(echo = T, warning = F, message = F, out.width="100%", fig.align = "center", dpi = 100)
+
+```
+
+```{r load-theme, echo = F, results = "asis"}
+## Custom sciRmdTheme with increased width.
+## Please ask guillermorocamora@gmail.com for more details.
+sciRmdTheme::set.theme(
+  theme = "default",
+  color = NULL,
+  header.sticky = FALSE,
+  list.group.icon = "arrow",
+  font.family = "Arial",
+  font.color = "black",
+  header.color = "darkblue"
+)
+
+# Set defaults for ggplots 
+theme_aw <- theme_set(
+  theme_bw(base_family = "Helvetica",
+           base_size = 14) + 
+    theme(panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          strip.background = element_blank(),
+          legend.position = "top",
+          axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+          axis.title.y = element_text(vjust = 0.6),
+          panel.spacing = unit(0.1, "lines"))
+)
+
+custom_gg_theme <- theme(plot.title = element_text(size = 14, face = "bold"),
+                         panel.border = ggplot2::element_rect(colour = "black", fill = NA, linewidth = 1),
+                         axis.text.x = ggplot2::element_text(color = "black", size = 9, angle = 0, hjust = 0.5),
+                         axis.text.y = ggplot2::element_text(color = "black", size = 9),
+                         axis.title.x = ggplot2::element_text(face = "bold", size = 11, margin=margin(5,0,0,0)),
+                         axis.title.y = ggplot2::element_text(face = "bold", size = 11, margin=margin(0,10,0,0)),
+                         panel.grid.minor = element_line(color = "#444444", linewidth  = 0.05, linetype = 2),
+                         panel.grid.major.y = element_line(color = "#444444", linewidth  = 0.05, linetype = 2),
+                         panel.grid.major.x = element_line(color = "#444444", linewidth  = 0.1),
+                         panel.background = element_rect(fill = "#FBFBFB"),
+                         legend.title = element_text(size=12),
+                         legend.text = element_text(size=10),
+                         legend.position = "top",
+                         legend.key = element_rect(color="black", linewidth = 0.2),
+                         legend.key.size = unit(1, 'lines'),
+                         strip.text.x = element_text(color = "black", face = "bold", size = 9),
+                         strip.background = element_rect(color="black", linewidth=1, linetype="solid"),
+                         strip.text.y = element_text(color = "black", face = "bold", size = 9),
+                         plot.margin = margin(0.5, 0.5, 0.2, 0.5, "cm"))
+
+
+```
+
+```{r paths}
+# Set path
+here::i_am("docs/analyse_peridard_fat_gwas_coloc.Rmd")
+```
+
+
+```{r arguments}
+args <- list(
+   coloc_results_summary_file = here::here("processed_data",
+                                          "coloc",
+                                          "coloc_summary.Rds"),
+   coloc_results_dir = here::here("processed_data",
+                                  "coloc"),
+   coloc_figure_path = here::here("figures"),
+   raw_data_dir = here::here("raw_data"),
+    eqtl_gtf_gencode_26_file = "~/references/GRCh38/annotation/gencode.v26.annotation.gtf.gz"
+)
+```
+
+
+```{r functions}
+
+
+source(here::here("scripts",
+                  "colochelpr_functions.R"))
+
+munge_gtex8_eqtl_for_analysis <- function(eqtl_df){
+  #' Function that munges the raw gtex8 eqtl for use with colochelpR
+  #' @param eqtl_df loaded eqtl dataframe
+  #' @param T/F whether to add in the sample number from the eqtl lookup table. Required in running coloc, but not in exploring loci during analysis.
+  #' @return dataframe munged for coloc
+  
+  eqtl_df <- eqtl_df %>% 
+    dplyr::mutate(eqtl_dataset = eqtl_name,
+                  gene = str_replace(gene_id, "\\..*$", "")) %>%  #remove suffix digit from gene_id%>% 
+    separate(variant_id,
+             into = c("CHR", "BP", "Al2", "Al1", "GRCh"), #split variant column into snp identifier columns. The first column is the ref column (Al2), the second is the alt/effect column (AL1)
+             sep = "_") %>% 
+    change_CHR_gencode_to_ensembl(.) %>%    # change gencode Chr format to ensembl
+    generate_location_based_SNP_column() %>% 
+    left_join(.,
+              gtf,
+              by = "gene_id") %>% 
+    dplyr::select(eqtl_dataset, gene, gene_name, SNP, CHR, BP, beta = slope, se = slope_se, p.value = pval_nominal, Al1, Al2, maf)  %>% 
+    get_varbeta() %>% 
+    change_indels() %>% 
+    remove_duplicated_snps()
+  
+  return(eqtl_df)
+
+}
+
+
+
+
+```
+
+
+
+>Aim: The aim of this analysis is to explore the significant loci in a pericardial fat MRI imaging-genetics GWAS study using colocalisation analysis with expression QTL results from adipose tissue in GTEx8.
+<br><br>
+
+# Background
+
+This analysis explores results of colocalisation analysis between:
+
+1) 6 GWAS loci found in a study of pericardial fat volume.
+
+- The GWAS used MRI pericardial fat volume as the outcome measure, including 28,126 participants: 18,774 utilised in the discovery set and 9,387 in the replication dataset.
+- Significant results were identified in 3 different ways: by position, via eQTL, and via chromatin interactions. Given that the GTEx8 eqtl are cis-QTLs, we explored only those loci of results that were significant either positionally or via eQTL. These were: TBX15, WARS2, RP11-418J17.1, RP4-712E4.1, RPS3AP12. EBF1 was tested although it was identified through chromatin interactions (which, given its likely trans nature is not expected to show significant results).
+- Note that while RPS3AP12 (ENSG00000236804.2) was tested, there were no results for this gene as it was not found in the GTEx8 eqtl (despite being present in the gencode v26 gtf used in GTEx8).
+
+2) Adipose tissue eQTL from GTEx8.
+
+- These were downloaded from the `GTEx_Analysis_v8_eQTL_all_associations/` directory of this [google storage](https://console.cloud.google.com/storage/browser/gtex-resources/GTEx_Analysis_v8_QTLs?pageState=(%22StorageObjectListTable%22:(%22f%22:%22%255B%255D%22))&prefix=&forceOnObjectsSortingFiltering=false).
+- We have explored coloc in the following 6 GTEx8 tissues: visceral adipose tissue (from omentum), subcutaneous adipose tissues, arteries including aorta, coronary and tibial, as well as the atrial appendage and left ventricle of the heart.
+
+
+
+
+
+# Colocalisation
+
+Colocalisation analysis utilises a Bayesian framework to predict the outcome of interest: the posterior probability of hypothesis 4 (PPH4) - that a SNP mediates risk of both PD and expression of a gene.
+
+Coloc uses a Bayesian approach to test the following hypotheses:
+
+* H0: No association with either trait.
+* H1: Association with trait 1, not with trait 2.
+* H2: Association with trait 2, not with trait 1.
+* H3: Association with trait 1 and 2, two independent SNPs.
+* **H4: Association with trait 1 and trait 2, one shared SNP.** This is the one of greatest interest to us, where PPH4 > 0.75 (and especially >0.9) is considered significant.
+<br>
+
+The prior probabilities for the Beyesian framework were specified as follows:
+
+* p1: the prior probability that any random SNP in the region is associated with trait 1 [coloc default, 1e-04]
+* p2: the prior probability that any random SNP in the region is associated with trait 2 [coloc default, 1e-04]
+* p12: the prior probability that any random SNP in the region is associated with both traits. Coloc was run using a liberal [1e-05, the coloc default] and a robust p12 [5e-06]
+
+<br>
+![Alt text](https://journals.plos.org/plosgenetics/article/figure/image?size=large&id=10.1371/journal.pgen.1004383.g001){width=75%}
+
+
+
+<br>
+This analysis utilises the wrapper functions within the colochelper package, written by David Zhang and Regina Reynolds.
+
+
+# Methods: 
+
+Coloc was run using the following scripts:
+
+```{r analysis-script_foo, eval=F}
+
+# This script was used to run coloc
+source(here::here("scripts", "01_munge_GWASs_for_coloc.R"))
+
+source(here::here("scripts", "02_run_coloc_pericard-fat_gtex-adipose.R"))
+
+source(here::here("scripts", "03_process_coloc_results_pericard-fat_gtex-adipose.R"))
+
+       
+```
+
+
+# Results
+
+Using the liberal priors, the RP4-712E4.1 locus was strongly positive in the discovery GWAS in subcutaneous fat (PPH4 92%), and in the tibial artery (PPH4 96%). This result was not seen in the replication GWAS. The next closest was TBX15 which had a posterior probability of hypothesis 4 of 53% in the left ventricle.
+<br>
+Also note that the PPH3 for WARS2 and RP11-418J17.1 was very high (>99%) in all tissues in the discovery dataset, though not in the replication dataset, suggesting that many independent SNPs are modifying the gene expression and PAT at that locus.
+
+```{r}
+all_results <- readRDS(args$coloc_results_summary_file)
+
+
+
+```
+
+
+
+
+
+```{r}
+prior_type <- "liberal"
+results <- all_results[[prior_type]]
+
+
+results_list <- results %>% 
+  group_split(eqtl) %>% 
+  setNames(unique(results$eqtl))
+```
+
+
+## All results - tables {.tabset}
+
+```{r, results = 'asis', echo = FALSE}
+
+for(i in 1:length(results_list)) {
+  
+  eqtl_name <- names(results_list[i])
+  cat("### ", eqtl_name, "\n")
+  cat("\n")
+  
+    results_list[[i]] %>% 
+      kableExtra::kbl(caption =  str_c(names(results_list)[i], " eQTL Results"), 
+                      booktabs = T,
+                      digits = 5,
+                      linesep = "") %>%
+      kableExtra::kable_classic(full_width = F, "hover", "striped", html_font = "Arial", font_size = 12) %>%
+      kableExtra::row_spec(0, bold = T, font_size = 14) %>% 
+      htmltools::HTML() %>% 
+      print()
+  
+
+   
+  cat("\n")
+  cat("\n")
+  
+}
+
+
+```
+
+
+
+
+
+
+## Results summary
+
+
+```{r, fig.height = 16, fig.width = 10}
+
+zissou10 <- wes_palette("Zissou1", 10, type = "continuous")
+
+summary_barchart <- results %>% 
+  ggplot(aes(x = gene_name, y = PP.H4.abf, fill = gene_name)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  scale_fill_manual(values = zissou10) +
+  labs(y = "PPH4", x = "Gene locus") +
+  theme(strip.text.y = element_text(size = 8)) +
+  facet_grid(rows = vars(eqtl), cols = vars(GWAS_1))
+  
+summary_barchart
+
+```
+
+
+
+## Exploring individual loci
+
+
+
+```{r}
+results_dir <- find_coloc_results_paths(directory_to_search = args$coloc_results_dir, pattern_to_search = ".rda") 
+
+coloc_files <- results_dir %>% 
+  dplyr::filter(prior_type == "liberal") %>%  #Filter to match the results we are exploring
+  dplyr::inner_join(results,
+                    c("gene" = "gene_2",
+                      "gwas" = "GWAS_1",
+                      "eqtl")) %>% 
+  dplyr::arrange(eqtl, gwas, gene)
+```
+
+
+
+### Sensitivity analysis - significant results {.tabset}
+
+Here we check individual loci showing the Manhattan plots of p values for trait 1 (gwas) and 2 (eQTL), as well as the prior and posterior marginal probability curves. The p values for the SNPs in LD with each other seem to overlap, suggesting that these are real colocalisations. This is further seen in the scatter plots (below) of p values comparing the GWAS results (x axis) and eqtl result (y-axis).
+<br>
+
+A note regarding alleles: 
+- In the GWAS, Allele 1 is the major allele, Allele 2 is the minor prevalence (GRCh37) allele.
+- In the GTEx8 eQTLs, Ota eqtl, Ref allele is the allele in the reference genome - this is coloc Al2, and the Alt allele is the effect allele - this is coloc Al1.
+- So the beta directions should be harmonised between the datasets and not require flipping. This is confirmed in the code below.
+
+
+For both loci relating to RP4-712E4.1, the sensitivity analysis show that the SNPs for the GWAS (trait 1) and the eQTL (trait 2) do indeed colocalise as the SNPs in  reflects the SNPs in LD with the lead SNP.
+
+```{r}
+# Given the eqtl is coding with the ensembl gene id (including suffix number), and I have removed these from the coloc results, I will look up the complete ensembl gene number with suffix from the gtf, using the gene name.
+gtf <- rtracklayer::readGFF(args$eqtl_gtf_gencode_26_file) %>% 
+  as_tibble() %>% 
+  dplyr::select(gene_id, gene_name) %>% 
+  dplyr::distinct(gene_name, gene_id) 
+
+
+sig_coloc_files <- coloc_files %>% 
+  dplyr::filter(PP.H4.abf > 0.75) %>% 
+  dplyr::left_join(.,
+                   gtf,
+                   by = "gene_name") # Add in column called gene_id which includes suffix number for ENSG code, to allow easier searching of large eqtl file
+  
+  
+  
+```
+
+```{r, results = 'asis', echo = FALSE}
+
+for(i in 1:nrow(sig_coloc_files)) {
+  
+  name <- str_c(sig_coloc_files$gwas[i], " - ", sig_coloc_files$eqtl[i], " - ", sig_coloc_files$gene_name[i]) 
+  cat("#### ", name, "\n")
+  cat("\n")
+  cat("Sensitivity analyses for: ", name," - ", sig_coloc_files$prior_type[i], " prior")
+  cat("\n")
+
+  load(as.character(sig_coloc_files$file_path[i]))
+  
+  coloc::sensitivity(coloc_results_annotated, "H4 >= 0.75", plot.manhattans = T)
+  cat("\n")
+  cat("\n")
+  
+}
+
+```
+
+
+
+### p and beta analysis - sig results {.tabset}
+
+```{r, eval = F}
+
+# Generate p value and beta comparison plots
+
+coloc_list <- list()
+
+for(i in 1:nrow(sig_coloc_files)){
+  
+
+  gwas_name = sig_coloc_files$gwas[i]
+  eqtl_name = sig_coloc_files$eqtl[i]
+  gene_name = sig_coloc_files$gene_name[i]
+  gene_id_to_search = sig_coloc_files$gene_id[i]
+  coloc_locus = str_c(gwas_name, " - ", eqtl_name, " - ", gene_name)
+  
+  print(str_c("Locus number is: ", i))
+  print(str_c("Locus is: ", coloc_locus))
+  
+# Load the original gwas
+gwas_path = str_c(args$raw_data_dir, "/", gwas_name, "_tidy_varbeta.txt")
+gwas <- fread(gwas_path)
+
+# Load the original eqtl
+eqtl_path = str_c(args$raw_data_dir, "/GTEx_Analysis_v8_QTLs-GTEx_Analysis_v8_eQTL_all_associations-", eqtl_name, ".allpairs.txt")
+eqtl <- fread(eqtl_path)
+
+print("Filtering eqtl")
+
+eqtl_tidy_gene_filtered <- 
+  eqtl %>% # Tidy eqtl as per when coloc is run, but without including mafs or varbeta as these are not required.
+  dplyr::filter(gene_id == gene_id_to_search) %>%    # Find only the significant genes in the eqtl of interest
+  munge_gtex8_eqtl_for_analysis(.)
+
+
+
+
+
+print("Join eqtl with gwas and check direction")
+# Join the gwas and eqtl datasets - this is dorn using the colochelpr function which raises warnings if the datasets are not aligned properly.
+locus_gwas_qtl_overlap <- colochelpR::join_coloc_datasets(df1 = gwas, 
+                                    df2 = eqtl_tidy_gene_filtered, 
+                                    harmonise = T)
+
+data_to_plot <- locus_gwas_qtl_overlap %>% 
+  dplyr::select(SNP, gene = gene_name_2, tissue = eqtl_dataset_2, 
+                Al1_gwas = Al1_1, Al2_gwas = Al2_1, beta_gwas = beta_1, p_gwas = p.value_1, 
+                Al1_eqtl = Al1_2, Al2_eqtl = Al2_2, beta_eqtl = beta_2, p_eqtl = p.value_2) %>% 
+  tidyr::separate(col = "SNP", into = c("chr", "pos"), sep = "_", remove = F) %>% 
+  dplyr::mutate(pos_MB = as.numeric(pos)/1000000,
+                log_p_gwas = -log10(p_gwas),
+                log_p_eqtl = -log10(p_eqtl))
+
+# Check if Allele 1 and 2 match between datasets, by adding a column which will be TRUE if this is the case
+directionality_check <- 
+  data_to_plot %>% 
+  dplyr::mutate(matched_effect_and_alt_allele = case_when(Al1_gwas == Al1_eqtl & Al2_gwas == Al2_eqtl ~ TRUE,
+                                                          TRUE ~ FALSE),
+                swapped_effect_and_alt_allele = case_when(matched_effect_and_alt_allele == FALSE & Al1_gwas == Al2_eqtl & Al2_gwas == Al1_eqtl ~ TRUE,
+                                                          TRUE ~ FALSE))
+
+
+
+directionality_check %>% 
+  count(matched_effect_and_alt_allele)
+
+directionality_check %>% 
+  count(swapped_effect_and_alt_allele)
+
+
+SNPs_to_exclude <- directionality_check %>%
+                             dplyr::filter(matched_effect_and_alt_allele == FALSE, swapped_effect_and_alt_allele== FALSE) %>%
+                             .[["SNP"]]
+
+SNPs_to_swap <- directionality_check %>% 
+                             dplyr::filter(matched_effect_and_alt_allele == FALSE, swapped_effect_and_alt_allele== TRUE) %>% 
+                             .[["SNP"]]
+
+harmonised_alleles <- 
+  data_to_plot %>% 
+  dplyr::filter(!SNP %in% SNPs_to_exclude) %>% 
+  dplyr::mutate(beta_2 = case_when(SNP %in% SNPs_to_swap ~ (-beta_eqtl),
+                                     TRUE ~ beta_eqtl),
+                Al1_eqtl = case_when(SNP %in% SNPs_to_swap ~ Al1_gwas,
+                                     TRUE ~ Al1_eqtl),
+                Al2_eqtl = case_when(SNP %in% SNPs_to_swap ~ Al2_gwas,
+                                     TRUE ~ Al2_eqtl))
+
+harmonised_alleles <- harmonised_alleles %>% 
+   dplyr::mutate(genome_wide_signif = case_when(p_gwas < 1e-5 | p_eqtl < 5e-8 ~ TRUE,
+                                               TRUE ~ FALSE)) 
+print("Creating plots")
+
+p_plot <- harmonised_alleles %>% 
+  ggplot(aes(x = log_p_eqtl, y = log_p_gwas, colour = genome_wide_signif)) +
+  geom_point(size = 0.8, alpha = 0.3) +
+   scale_colour_manual(values = c("#888888", "#3B9AB2")) +
+    geom_hline(yintercept = -log10(5*10^-8), linetype = "dashed") +
+  geom_hline(yintercept = -log10(1e-5), linetype = "dashed", colour = "grey50") +
+  geom_vline(xintercept = -log10(5*10^-8), linetype = "dashed") +
+    ggpubr::stat_cor(method = "spearman", cor.coef.name = "rho", colour = "black", size = 4) +
+    labs(x = "-log10(eQTL p-value)", 
+         y = "-log10(GWAS p-value)",
+          colour = "Significant in GWAS or eQTL")
+  
+
+beta_plot <- harmonised_alleles %>% 
+  ggplot(aes(x = beta_eqtl, y = beta_gwas, colour = genome_wide_signif)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+    geom_smooth(formula = y ~ x, method = "lm", level = 0.99, colour = "black", size = 0.5, fill = "#4DA2B7") +
+      ggpubr::stat_cor(method = "spearman", cor.coef.name = "rho", colour = "black", size = 4) +
+    scale_colour_manual(values = c("#888888", "#3B9AB2")) +
+    labs(x = "eQTL beta",
+         y = "GWAS beta",
+          colour = "Significant in GWAS or eQTL") 
+  
+locus_plot <- (p_plot + beta_plot) +
+  plot_layout(guides = "collect") +
+  plot_annotation(subtitle = str_c("Coloc results: ", coloc_locus))
+
+print("Saving data")
+
+ggsave(locus_plot,
+       file = str_c(args$coloc_figure_path, "/summary_figures/", coloc_locus, ".png"),
+       device = "png",
+       width = 22, height = 12, units = "cm")
+
+coloc_list[[coloc_locus]] <- list(
+    locus_data = harmonised_alleles,
+    locus_plot = locus_plot)
+
+print("Locus complete")
+
+}
+
+saveRDS(coloc_list,
+        file = str_c(args$coloc_figure_path, "/p_beta_comparisons.Rds"))
+
+```
+
+
+```{r}
+# Load pre-run coloc summary list
+coloc_list <- readRDS(file = str_c(args$coloc_figure_path, "/p_beta_comparisons.Rds"))
+
+locus_plots <- map(coloc_list, ~ .x$locus_plot)
+```
+
+### Explore P and beta values {.tabset}
+
+Exploring p values for individual SNPs contributing to a locus allows confirmation of a true colocalisation - if the SNPs of highest significance for the GWAS are also of significance for the eQTL, it is likely that this is a true signal. In these results, there is a mixture of p values that correlate with each other and those that don't - a moderately strong signal.
+<br>
+The beta comparison plots allows exploration re whether the direction of the significant signals align or not, based on the correlation of betas between one trait and another. In this case, both relationships have a positive correlation of betas, suggesting that an increase in gene expression is associated with an increased pericardial volume.
+<br>
+
+### p and beta analysis - sig results {.tabset}
+
+
+```{r, results = "asis", echo = FALSE, fig.width = 12, fig.height = 6}
+
+rmd_tabsets <- function(.data) {
+
+  purrr::imap(.data, function(.x, .y) {
+    cat("#### ", .y, "\n\n", sep = "")
+    print(.x)
+    cat("\n\n")
+  })
+  # close with empty header to stop tabsets
+  cat("#### {.unlisted .unnumbered}")
+}
+
+
+rmd_tabsets(locus_plots)
+
+```
+
+
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+  
+  
+  
+  

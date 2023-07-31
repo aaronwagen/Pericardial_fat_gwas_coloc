@@ -15,6 +15,7 @@ knitr::opts_chunk$set(
 
 # Background
 This repository contains scripts used to perform a colocalisation analysis using the pericardial fat GWAS and tissue eQTLs from GTEx v8. 
+
 # Citation
 If you use any of the code or data from this repository, please cite our [paper](). Further, if you use any of the software used within this repository (e.g. `coloc`, `colochelpR`, etc.) please make sure to cite the software appropriately. 
 
