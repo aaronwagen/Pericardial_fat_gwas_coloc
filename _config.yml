@@ -1,8 +1,7 @@
 # This file sets the theme for publishing this repo to github pages.
 
-theme: pages-themes/slate@v0.2.0
-plugins:
-- jekyll-remote-theme # add this line to the plugins list if you already have one
+remote_theme: jekyll/slate
 
 title: Pericardial fat GWAS colocalisation analysis
+
 description: This repository explores colocalisations between a pericardial fat GWAS and tissue specific gene expressiom from GTEx8.
