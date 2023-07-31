@@ -26,7 +26,7 @@ The workflow and analysis, including utilisation of any scripts, is
 described in analyse_pericard_fat_gwas_coloc.Rmd.
 
 It can be view interactively at:
-<https://aaronwagen.github.io/pat_gwas_gtex_coloc/>
+[https://aaronwagen.github.io/pat_gwas_gtex_coloc](https://aaronwagen.github.io/Pericardial_fat_gwas_coloc/)
 
 Within this repository you will otherwise find:
 
